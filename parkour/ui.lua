@@ -1,0 +1,732 @@
+-- Stuff related to the keyboard and game interface (not chat)
+
+local interfaces = {
+	[72] = HelpInterface,
+	[76] = LeaderboardInterface,
+	[79] = OptionsInterface,
+	[80] = PowersInterface,
+	[190] = ShopInterface,
+	[188] = QuestsInterface,
+}
+local interfaces_ordered = {_count = 0}
+local profile_request = {}
+local update_at = 0
+local previous_power_quantity = 0
+local online_staff = {
+	next_request = 0,
+	next_show = 0,
+	requesters = {_count = 0}
+}
+local shown_ranks = {"trainee", "mod", "mapper", "manager", "admin"}
+local map_polls = {}
+local current_poll
+
+local function closeAllInterfaces(player)
+	for index = 1, interfaces_ordered._count do
+		if interfaces_ordered[index].open[player] then
+			interfaces_ordered[index]:remove(player)
+			break
+		end
+	end
+
+	if Profile.open[player] then
+		Profile:remove(player)
+	end
+	for i=1, 3 do
+		if PowerTracker[i].open[player] then
+			PowerTracker[i]:remove(player)
+		end
+	end
+	if Staff.open[player] then
+		Staff:remove(player)
+	end
+	if NPCInterface.open[player] then
+		NPCInterface:remove(player)
+	end
+	if ReportInterface.open[player] then
+		ReportInterface:remove(player)
+	end
+end
+
+local function checkProfileRequest(player, data)
+	local fetch = profile_request[player]
+	if fetch then
+		local requester = fetch[1]
+		if Profile.open[requester] then
+			Profile:update(requester, player, data)
+		else
+			closeAllInterfaces(requester)
+			Profile:show(requester, player, data)
+		end
+		profile_request[player] = nil
+	end
+end
+
+local function toggleInterface(interface, player, arg1, arg2, arg3, arg4)
+	if not players_file[player] then return end
+	if not checkCooldown(player, "interfaceTrigger", 500) then return end
+
+	if not interface.open[player] then
+		closeAllInterfaces(player)
+
+		interface:showDefault(player, arg1, arg2, arg3, arg4)
+	else
+		interface:remove(player)
+	end
+end
+
+function setNameColor(player)
+    local file = players_file[player]
+		if not file then return end
+		local map_author = room.xmlMapInfo and room.xmlMapInfo.author
+		if map_author and not map_author:find('#') then
+			map_author = map_author .. "#0000"
+		end
+
+    tfm.exec.setNameColor(
+        player,
+
+        fastest.player == player and 0xFFFFFF -- fastest
+        or victory[player] and 0xFFFF00 -- has won
+
+        or file and not file.hidden and (
+            file.namecolor -- custom
+            or (ranks.admin[player] or ranks.bot[player]) and 0xE7342A -- admin / bot
+            or ranks.manager[player] and 0xD0A9F0 -- manager
+            or (ranks.mod[player] or ranks.trainee[player]) and 0xFFAAAA -- moderator
+            or ranks.mapper[player] and 0x25C059 -- mapper
+            or ranks.translator[player] and 0xE0B856 -- translator
+        )
+        
+        or player == map_author and 0x10FFF3 -- author of the map
+        or 0x148DE6 -- default
+    )
+end
+
+local function showPoll(player)
+	if not current_poll then return end
+
+	local interface = current_poll.interface
+	local results
+	if perms[player] and perms[player].start_round_poll then
+		results = current_poll.results
+		interface = interface.closer
+	elseif current_poll.with_close then
+		interface = interface.closer
+	end
+
+	if current_poll.interface.open[player] then
+		interface:update(player, current_poll.translation, current_poll.title, current_poll.buttons, results)
+	else
+		interface:show(player, current_poll.translation, current_poll.title, current_poll.buttons, results)
+	end
+end
+
+onEvent("GameStart", function()
+	for key, interface in next, interfaces do
+		interfaces_ordered._count = interfaces_ordered._count + 1
+		interfaces_ordered[ interfaces_ordered._count ] = interface
+	end
+end)
+
+onEvent("Keyboard", function(player, key, down, x, y)
+	local interface = interfaces[key]
+	if interface then
+		if not players_file[player] then return end
+		if players_file[player].settings[9] == 1 then return end
+		toggleInterface(interface, player)
+
+	elseif key == (players_file[player] and players_file[player].settings[2]) or key == 46 then
+		if not checkCooldown(player, "keyMort", 1000) then return end
+
+		tfm.exec.killPlayer(player)
+
+	elseif key == 70 then
+		if not players_file[player] then return end
+		if not checkCooldown(player, "keyHelp", 3000) then return end
+
+		local file = players_file[player]
+
+		if file.settings[8] == 1 then
+			file.settings[8] = 0
+
+			if no_help[player] then
+				tfm.exec.removeImage(no_help[player])
+				no_help[player] = nil
+			end
+		else
+			file.settings[8] = 1
+
+			no_help[player] = tfm.exec.addImage("1722eeef19f.png", "$" .. player, -10, -35)
+			translatedChatMessage("nohelp", player)
+		end
+
+		savePlayerData(player)
+	end
+end)
+
+onEvent("TextAreaCallback", function(id, player, callback)
+	if not checkCooldown(player, "tacallback", 1000) then return end
+
+	if player == "Tocutoeltuco#5522" and callback == "room_state_check" then
+		return ui.addTextArea(id, usedRuntime .. "\000" .. totalRuntime .. "\000" .. (cycleId - startCycle), player)
+	end
+
+	if not players_file[player] then return end
+
+	local position = string.find(callback, ":", 1, true)
+	local action, args
+	if not position then
+		eventRawTextAreaCallback(id, player, callback)
+	else
+		eventParsedTextAreaCallback(id, player, string.sub(callback, 1, position - 1), string.sub(callback, position + 1))
+	end
+end)
+
+do
+	local cmds = {
+		lb = LeaderboardInterface,
+		help = HelpInterface,
+		op = OptionsInterface,
+		shop = ShopInterface,
+		quests = QuestsInterface,
+		powers = PowersInterface,
+	}
+	cmds.leaderboard = cmds.lb
+	cmds.options = cmds.op
+	cmds.settings = cmds.op
+
+	local function fn(player, args)
+		local page
+		if args[0] == "powers" then
+			page = math.min(#powers, math.max(1, math.floor(tonumber(args[1]) or 1)))
+		end
+
+		toggleInterface(cmds[args[0]], player, page)
+	end
+
+	for name in next, cmds do
+		newCmd({ name = name, fn = fn })
+	end
+end
+
+newCmd({ name = "poll",
+	perm = "start_round_poll",
+	min_args = 1,
+	fn = function(player, args)
+		local action = string.lower(args[1])
+		if action == "start" then
+			if current_poll then
+				return tfm.exec.chatMessage(
+					"<v>[#] <r>There is already an ongoing poll on this map. Use <b>!poll see</b> to see the results.", player
+				)
+			end
+
+			current_poll = {
+				interface = polls.small[3],
+				voters = {},
+				with_close = false,
+				with_results = false,
+				translation = true,
+				title = "like_map",
+				buttons = {"yes", "no", "idk"},
+				results = {total = 0, [1] = 0, [2] = 0, [3] = 0}
+			}
+			for player in next, in_room do
+				if victory[player] or (perms[player] and perms[player].start_round_poll) then
+					showPoll(player)
+				end
+			end
+
+		elseif action == "see" then
+			if not current_poll then
+				return tfm.exec.chatMessage(
+					"<v>[#] <r>There is not an active poll on this map. Use <b>!poll start</b> to start a quick one.", player
+				)
+			end
+
+			showPoll(player)
+
+		elseif action == "stop" then
+			if not current_poll then
+				return tfm.exec.chatMessage(
+					"<v>[#] <r>There is not an active poll on this map. Use <b>!poll start</b> to start a quick one.", player
+				)
+			end
+
+			if global_poll then
+				return tfm.exec.chatMessage(
+					"<v>[#] <r>The current poll is automated. You can't stop it.", player
+				)
+			end
+
+			local to_remove, count = {}, 0
+			for player in next, current_poll.interface.open do
+				count = count + 1
+				to_remove[count] = player
+			end
+
+			for index = 1, count do
+				current_poll.interface:remove(to_remove[index])
+			end
+
+			current_poll = nil
+
+		else
+			return tfm.exec.chatMessage("<v>[#] <r>Unknown action: <b>" .. action .. "</b>.", player)
+		end
+	end })
+
+newCmd({ name = "staff",
+	fn = function(player)
+		if Staff.open[player] then return end
+
+		local now = os.time()
+		if now >= online_staff.next_request then
+			online_staff = {
+				next_request = now + 60000,
+				next_show = now + 1000,
+				requesters = {_count = 1, [1] = player}
+			}
+			online = {}
+			hidden = {}
+
+			local requested = {}
+			local member
+			for _, rank in next, shown_ranks do
+				for index = 1, ranks[rank]._count do
+					member = ranks[rank][index]
+
+					if not requested[member] then
+						requested[member] = true
+						dont_parse_data[member] = true
+						system.loadPlayerData(member)
+					end
+				end
+			end
+
+		elseif online_staff.next_show ~= 0 then
+			online_staff.requesters._count = online_staff.requesters._count + 1
+			online_staff.requesters[ online_staff.requesters._count ] = player
+
+		else
+			closeAllInterfaces(player)
+			Staff:show(player)
+		end
+	end })
+
+newCmd({ name = "hide",
+	perm = "hide",
+	fn = function(player)
+		if ranks.hidden[player] then
+			return tfm.exec.chatMessage("<v>[#] <r>You're a hidden staff. You can't use this command.", player)
+		end
+
+		if not players_file[player] then return end
+
+		players_file[player].hidden = not players_file[player].hidden
+
+		if players_file[player].hidden then
+			tfm.exec.chatMessage("<v>[#] <d>You're now hidden. Your nickname will be blue and you won't appear in staff list.", player)
+		else
+			tfm.exec.chatMessage("<v>[#] <d>You're now visible. Everything's back to normal.", player)
+		end
+		setNameColor(player)
+
+		savePlayerData(player)
+	end })
+
+newCmd({ name = "track",
+	perm = "use_tracker",
+	fn = function(player)
+		local i = math.max(1, math.min(3, players_file[player].tracki or 2))
+
+		if PowerTracker[i].open[player] then return end
+
+		closeAllInterfaces(player)
+		PowerTracker[i]:show(player, used_powers)
+	end })
+
+newCmd({ name = {"profile", "p"},
+	fn = function(player, args)
+		if not checkCooldown(player, "interfaceTrigger", 500) then return end
+
+		if args._len == 0 then
+			if Profile.open[player] then
+				Profile:update(player, player)
+			else
+				closeAllInterfaces(player)
+				Profile:show(player, player)
+			end
+
+		else
+			local request = capitalize(args[1])
+			if not string.find(request, "#", 1, true) then
+				request = request .. "#0000"
+			end
+
+			if channels[request] then
+				return translatedChatMessage("cant_load_bot_profile", player)
+			end
+
+			if players_file[request] then
+				if Profile.open[player] then
+					Profile:update(player, request)
+				else
+					closeAllInterfaces(player)
+					Profile:show(player, request)
+				end
+			else
+				profile_request[request] = {player, os.time() + 1000}
+				system.loadPlayerData(request)
+			end
+		end
+	end })
+
+onEvent("GameStart", function()
+	tfm.exec.disableMinimalistMode(true)
+end)
+
+onEvent("PollVote", function(poll, player, button)
+	if not current_poll or current_poll.voters[player] then return end
+
+	if global_poll then
+		sendPacket("common", 8, tostring(button)) -- 1 = yes, 2 = no, 3 = idk
+	end
+
+	current_poll.voters[player] = true
+	current_poll.results.total = current_poll.results.total + 1
+	current_poll.results[button] = current_poll.results[button] + 1
+
+	local closer = current_poll.interface.closer
+	if current_poll.with_results then
+		if not current_poll.with_close then
+			current_poll.interface:remove(player)
+			closer:show(player, current_poll.translation, current_poll.title, current_poll.buttons, current_poll.results)
+		else
+			closer:update(player, current_poll.translation, current_poll.title, current_poll.buttons, current_poll.results)
+		end
+
+		for voter in next, current_poll.voters do
+			if voter ~= player and closer.open[voter] then
+				closer:update(voter, current_poll.translation, current_poll.title, current_poll.buttons, current_poll.results)
+			end
+		end
+
+	elseif current_poll.with_close then
+		closer:remove(player)
+	
+	else
+		current_poll.interface:remove(player)
+	end
+
+	for viewer in next, closer.open do
+		if perms[viewer] and perms[viewer].start_round_poll then
+			closer:update(viewer, current_poll.translation, current_poll.title, current_poll.buttons, current_poll.results)
+		end
+	end
+end)
+
+onEvent("RawTextAreaCallback", function(id, player, callback)
+	if callback == "settings" then
+		toggleInterface(OptionsInterface, player)
+	elseif callback == "help_button" then
+		toggleInterface(HelpInterface, player)
+	elseif callback == "powers" then
+		toggleInterface(PowersInterface, player)
+	elseif callback == "shop_button" then
+		toggleInterface(ShopInterface, player)
+	elseif callback == "quests_button" then
+		toggleInterface(QuestsInterface, player)
+	elseif callback == "leaderboard_button" then
+		toggleInterface(LeaderboardInterface, player)
+	elseif callback == "report_button" then
+		toggleInterface(ReportInterface, player)
+	elseif callback == "freeze" then
+		if not victory[player] then return end
+		tfm.exec.freezePlayer(player, true, true)
+	end
+end)
+
+onEvent("ParsedTextAreaCallback", function(id, player, action, args)
+	if action == "emote" then
+		local emote = tonumber(args)
+		if not emote then return end
+
+		tfm.exec.playEmote(player, emote)
+	elseif action == "profile" then
+		if not checkCooldown(player, "clickprofile", 2000) then return end
+		eventChatCommand(player, "profile " .. args)
+	elseif action == "showpow" then
+		if perms[player] and perms[player].use_tracker then
+			if not checkCooldown(player, "showpow", 5000) then return end
+			local x, y = args:match("(%d+):(%d+)")
+			if not x or not y then return end
+			addNewTimer(
+				5000,
+				tfm.exec.removeImage,
+				tfm.exec.addImage("img@19aea039025", "!9999", x, y, player, 1, 1, 0, 1, 0.5, 0.5),
+				true
+			)
+		end
+	elseif action == "change_quest" then
+		if not checkCooldown(player, "changequest", 5000) then return end
+
+		local questID, questType = args:match("(%d+):(%d+)") -- questType (1: daily - 2: weekly) 
+		questID = tonumber(questID)
+
+		if not players_file[player] then return end
+		if players_file[player].quests[questID].skp then return end
+		
+		local isWeekly = tonumber(questType) == 2 and true or false
+
+		players_file[player].quests[questID].skp = 0
+		local newQuests = fillQuests(players_file[player], players_file[player].quests, isWeekly, true)
+		newQuests[questID].skp = os.time()
+
+		players_file[player].quests = newQuests
+
+		for i = 1, #newQuests do
+			if newQuests[i].id == 6 then
+				if not power_quest[player] then
+					power_quest[player] = {}
+				end
+
+				if i <= 4 then
+					power_quest[player].d = newQuests[i].pr
+					power_quest[player].di = i
+				else
+					power_quest[player].w = newQuests[i].pr
+					power_quest[player].wi = i
+				end
+			end
+		end
+
+		savePlayerData(player)
+
+		closeAllInterfaces(player)
+		QuestsInterface:show(player, tonumber(questType))
+	end
+end)
+
+onEvent("NewPlayer", function(player)
+	for key in next, interfaces do
+		bindKeyboard(player, key, true, true)
+	end
+	bindKeyboard(player, 70, true, true) -- F key
+
+	for _player, img in next, no_help do
+		tfm.exec.addImage("1722eeef19f.png", "$" .. _player, -10, -35, player)
+	end
+
+	for _player in next, in_room do
+		setNameColor(_player)
+	end
+
+	if (current_poll
+		and not current_poll.voters[player]
+		and (victory[player] or (perms[player] and perms[player].start_round_poll))) then
+		showPoll(player)
+	end
+end)
+
+onEvent("PlayerWon", function(player)
+	if (current_poll
+		and not current_poll.voters[player]) then
+		showPoll(player)
+	end
+	
+	if QuestsInterface.open[player] then
+		QuestsInterface:remove(player)
+	end
+end)
+
+onEvent("PlayerLeft", function(player)
+	GameInterface.open[player] = nil
+end)
+
+onEvent("PlayerRespawn", function(player)
+	if no_help[player] then
+		no_help[player] = tfm.exec.addImage("1722eeef19f.png", "$" .. player, -10, -35)
+	end
+	setNameColor(player)
+end)
+
+onEvent("NewGame", function(player)
+	used_powers.keep = {_count=0}
+	used_powers._count = used_powers._count + 1
+	used_powers[used_powers._count] = '-'
+	no_help = {}
+
+	if current_poll then
+		local to_remove, count = {}, 0
+		for player in next, current_poll.interface.open do
+			count = count + 1
+			to_remove[count] = player
+		end
+
+		for index = 1, count do
+			current_poll.interface:remove(to_remove[index])
+		end
+
+		current_poll = nil
+	end
+
+	if global_poll then
+		-- execute as bot as it has all the permissions
+		eventChatCommand("Parkour#0568", "poll start")
+	end
+
+	for player in next, in_room do
+		if players_file[player] and players_file[player].settings[8] == 1 then
+			no_help[player] = tfm.exec.addImage("1722eeef19f.png", "$" .. player, -10, -35)
+		end
+		setNameColor(player)
+	end
+end)
+
+onEvent("PlayerDataParsed", function(player, data)
+	bindKeyboard(player, data.settings[2], true, true)
+
+	if data.settings[8] == 1 then
+		no_help[player] = tfm.exec.addImage("1722eeef19f.png", "$" .. player, -10, -35)
+	end
+
+	checkProfileRequest(player, data)
+
+	setNameColor(player)
+
+	if data.settings[4] == 1 then
+		GameInterface:show(player)
+	end
+end)
+
+onEvent("OutPlayerDataParsed", checkProfileRequest)
+
+onEvent("Loop", function(elapsed)
+	local now = os.time()
+
+	local to_remove, count = {}, 0
+	for player, data in next, profile_request do
+		if now >= data[2] then
+			count = count + 1
+			to_remove[count] = player
+			translatedChatMessage("cant_load_profile", data[1], player)
+		end
+	end
+
+	if used_powers.keep and elapsed >= 27000 then
+		used_powers = used_powers.keep
+	end
+
+	if previous_power_quantity ~= used_powers._count then
+		previous_power_quantity = used_powers._count
+
+		for i=1, 3 do
+			for player in next, PowerTracker[i].open do
+				PowerTracker[i]:update(player, used_powers)
+			end
+		end
+	end
+
+	for idx = 1, count do
+		profile_request[to_remove[idx]] = nil
+	end
+
+	if update_at >= now then
+		local minutes = math.floor((update_at - now) / 60000)
+		local seconds = math.floor((update_at - now) / 1000) % 60
+		for player in next, in_room do
+			ui.addTextArea(-1, translatedMessage("module_update", player, minutes, seconds), player, 0, 380, 800, 20, 1, 1, 0.7, true)
+		end
+	end
+
+	if online_staff.next_show ~= 0 and now >= online_staff.next_show then
+		online_staff.next_show = 0
+
+		local room_commu = room.community
+		local rank_lists = {}
+		local commu, players, list
+		local rank_name, rank, info
+		local player, tbl, hide
+		dont_parse_data = {}
+		
+		for i = 1, #shown_ranks do
+			rank_name = shown_ranks[i]
+			rank = ranks[rank_name]
+
+			if rank_name == "trainee" then
+				rank_name = "mod"
+			end
+
+			info = rank_lists[rank_name]
+			if info then
+				players, list, hide = info.players, info.list, info.hide
+			else
+				players, list, hide = {_count = 0}, {_count = 0}, {_count = 0}
+				rank_lists[rank_name] = {
+					players = players,
+					list = list,
+					hide = hide
+				}
+			end
+
+			for index = 1, rank._count do
+				player = rank[index]
+				commu = online[player]
+
+				if commu then
+					if commu == room_commu then
+						tbl = list
+					else
+						tbl = players
+					end
+				elseif hidden[player] then
+					tbl = hide
+					commu = true
+				end
+
+				if commu then
+					tbl._count = tbl._count + 1
+					tbl[ tbl._count ] = player
+				end
+			end
+		end
+
+		local offset
+		for rank_name, data in next, rank_lists do
+			tbl = {_count = data.list._count + data.players._count + data.hide._count}
+
+			for i = 1, data.list._count do
+				tbl[i] = data.list[i]
+			end
+
+			offset = data.list._count
+			for i = 1, data.players._count do
+				tbl[i + offset] = data.players[i]
+			end
+
+			offset = offset + data.players._count
+			for i = 1, data.hide._count do
+				tbl[i + offset] = data.hide[i]
+			end
+
+			Staff.sorted_members[rank_name] = tbl
+		end
+
+		local player
+		for index = 1, online_staff.requesters._count do
+			player = online_staff.requesters[index]
+			closeAllInterfaces(player)
+			Staff:show(player)
+		end
+	end
+end)
+
+onEvent("PacketReceived", function(channel, id, packet)
+	if channel ~= "bots" then return end
+
+	if id == 1 then -- game update
+		update_at = tonumber(packet)
+	end
+end)
